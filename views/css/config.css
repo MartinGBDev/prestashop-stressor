@@ -1,0 +1,121 @@
+/* Stressor Config Styles */
+.form-group.disabled {
+    opacity: 0.6;
+    transition: opacity 0.3s ease;
+}
+
+.form-group.disabled input,
+.form-group.disabled select,
+.form-group.disabled textarea {
+    background-color: #f8f9fa !important;
+    cursor: not-allowed !important;
+    border-color: #ddd !important;
+}
+
+.form-group.disabled .bootstrap-switch {
+    opacity: 0.6;
+}
+
+.scenario-field,
+.header-field {
+    margin-bottom: 10px;
+    padding: 10px;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+    border-left: 3px solid #25b9d7;
+    transition: all 0.3s ease;
+}
+
+.scenario-field:hover,
+.header-field:hover {
+    background-color: #f0f3f8;
+}
+
+.scenario-field .row,
+.header-field .row {
+    align-items: center;
+}
+
+.remove-scenario,
+.remove-header {
+    padding: 5px 10px;
+    font-size: 12px;
+    transition: all 0.3s ease;
+}
+
+.remove-scenario:hover,
+.remove-header:hover {
+    background-color: #dc3545;
+    color: white;
+    transform: scale(1.05);
+}
+
+#scenarios-list,
+#headers-list {
+    margin-bottom: 15px;
+}
+
+#add-scenario,
+#add-header {
+    margin-top: 10px;
+    transition: all 0.3s ease;
+}
+
+#add-scenario:hover,
+#add-header:hover {
+    background-color: #25b9d7;
+    color: white;
+    border-color: #25b9d7;
+}
+
+/* Estilos para switches */
+.bootstrap-switch-wrapper {
+    display: inline-block;
+    vertical-align: middle;
+}
+
+.bootstrap-switch.bootstrap-switch-focused {
+    box-shadow: none;
+    border-color: #25b9d7;
+}
+
+/* Indicador visual para campos deshabilitados */
+.form-group.disabled label {
+    color: #6c757d;
+}
+
+/* Feedback de validación */
+input:invalid,
+select:invalid {
+    border-color: #dc3545 !important;
+}
+
+/* Animación para campos dinámicos */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.scenario-field,
+.header-field {
+    animation: fadeIn 0.3s ease;
+}
+
+/* Tooltips para botones */
+[title] {
+    cursor: pointer;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .scenario-field .row,
+    .header-field .row {
+        flex-direction: column;
+    }
+    
+    .scenario-field .col-lg-2,
+    .header-field .col-lg-2 {
+        margin-top: 10px;
+        text-align: right;
+    }
+}

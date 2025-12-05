@@ -20,6 +20,7 @@ class Stressor extends Module
         $this->author = 'Martin Alejandro Garcia Babastro';
         $this->need_instance = 1;
         $this->bootstrap = true;
+        $this->module_key = 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6';
 
         $this->displayName = 'Stressor';
         $this->description = 'Módulo de stress testing y auditoría de rendimiento';
@@ -30,10 +31,17 @@ class Stressor extends Module
 
     public function install()
     {
-        return parent::install() && 
+        $success = parent::install() && 
                $this->registerHook('displayAdminStatsModules') &&
                $this->registerHook('actionAdminControllerSetMedia') &&
                $this->createDatabaseTable();
+        
+        // Agregar un test de ejemplo con resultados
+        if ($success) {
+            $this->addSampleTestWithResults();
+        }
+        
+        return $success;
     }
     
     public function uninstall()
@@ -43,13 +51,14 @@ class Stressor extends Module
     }
     
     /**
-     * Crear tabla de base de datos con campo JSON único
+     * Crear tabla de base de datos con campos JSON
      */
     private function createDatabaseTable()
     {
         $sql = "CREATE TABLE IF NOT EXISTS `" . _DB_PREFIX_ . self::DB_TABLE . "` (
             `id_test` INT(11) NOT NULL AUTO_INCREMENT,
             `request` LONGTEXT NOT NULL COMMENT 'Configuración completa en formato JSON stringified',
+            `results` LONGTEXT NULL COMMENT 'Resultados del test en formato JSON stringified',
             `status` VARCHAR(50) DEFAULT 'draft',
             `created_at` DATETIME NOT NULL,
             `updated_at` DATETIME NOT NULL,
@@ -70,13 +79,87 @@ class Stressor extends Module
 
     public function hookDisplayAdminStatsModules()
     {
-        // TODO: Implementar dashboard
-        return '';
+        if (!$this->active) {
+            return '';
+        }
+        
+        // Obtener los últimos tests ejecutados
+        $sql = "SELECT * FROM `" . _DB_PREFIX_ . self::DB_TABLE . "` 
+                WHERE status = 'completed' 
+                AND results IS NOT NULL 
+                AND results != ''
+                ORDER BY executed_at DESC 
+                LIMIT 5";
+        
+        $tests = Db::getInstance()->executeS($sql);
+        
+        $this->context->controller->addCSS($this->_path . 'views/css/admin/stats.css');
+        $this->context->controller->addJS($this->_path . 'views/js/admin/stats.js');
+        
+        // Cargar Chart.js
+        $chartJsPath = _PS_JS_DIR_ . 'chartjs/Chart.min.js';
+        if (file_exists(_PS_ROOT_DIR_ . '/' . $chartJsPath)) {
+            $this->context->controller->addJS($chartJsPath);
+        } else {
+            // Usar CDN como fallback
+            $this->context->controller->addJS('https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js');
+        }
+        
+        // Preparar datos para los gráficos
+        $statsData = $this->prepareStatsData($tests);
+        
+        // Pasar datos al template
+        $this->context->smarty->assign([
+            'stressor_stats' => $statsData,
+            'stressor_configure_url' => $this->context->link->getAdminLink('AdminModules') . '&configure=' . $this->name
+        ]);
+        
+        // Renderizar el template
+        return $this->display(__FILE__, 'views/templates/hook/admin_stats.tpl');
     }
+    
+    public function hookActionAdminControllerSetMedia()
+{
+    if (Tools::getValue('configure') == $this->name || Tools::getValue('controller') == 'AdminStats') {
+        // Cargar CSS
+        $this->context->controller->addCSS($this->_path . 'views/css/admin/config.css');
+        $this->context->controller->addCSS($this->_path . 'views/css/admin/stats.css');
+        
+        // Cargar JS
+        $this->context->controller->addJS($this->_path . 'views/js/admin/config.js');
+        $this->context->controller->addJS($this->_path . 'views/js/admin/stats.js');
+        
+        // Cargar Chart.js para estadísticas
+        $chartJsPath = _PS_JS_DIR_ . 'chartjs/Chart.min.js';
+        if (file_exists(_PS_ROOT_DIR_ . '/' . $chartJsPath)) {
+            $this->context->controller->addJS($chartJsPath);
+        } else {
+            $this->context->controller->addJS('https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js');
+        }
+        
+        // Pasar traducciones a JavaScript
+        Media::addJsDef([
+            'stressorTranslate' => json_decode($this->getJsTranslations(), true),
+            'moduleName' => $this->name // Agregar nombre del módulo para referencia
+        ]);
+    }
+}
     
     public function getContent()
     {
         $output = '';
+        
+        // Manejar solicitudes AJAX
+        if (Tools::isSubmit('ajax') && Tools::isSubmit('action')) {
+            $this->processAjaxRequest();
+            return '';
+        }
+        
+        // Manejar exportación de resultados
+        if (Tools::isSubmit('export_test')) {
+            $this->exportTestResults((int)Tools::getValue('export_test'));
+            return '';
+        }
         
         // Procesar el formulario cuando se envía
         if (Tools::isSubmit('submitStressorConfig')) {
@@ -92,6 +175,8 @@ class Stressor extends Module
             $idTest = (int)Tools::getValue('id_test');
             if ($this->executeTest($idTest)) {
                 $output .= $this->displayConfirmation($this->l('Test ejecutado correctamente'));
+            } else {
+                $output .= $this->displayError($this->l('Error al ejecutar el test'));
             }
         }
         
@@ -102,6 +187,47 @@ class Stressor extends Module
         $output .= $this->renderTestsList();
         
         return $output;
+    }
+    
+    private function processAjaxRequest()
+    {
+        $action = Tools::getValue('action');
+        
+        switch ($action) {
+            case 'getTestResults':
+                $this->ajaxProcessGetTestResults();
+                break;
+            default:
+                die(json_encode(['success' => false, 'message' => 'Acción no válida']));
+        }
+    }
+    
+    /**
+     * Manejar solicitudes AJAX para obtener resultados
+     */
+    private function ajaxProcessGetTestResults()
+    {
+        $idTest = (int)Tools::getValue('id_test');
+        
+        $sql = "SELECT results FROM `" . _DB_PREFIX_ . self::DB_TABLE . "` 
+                WHERE id_test = " . $idTest;
+        
+        $test = Db::getInstance()->getRow($sql);
+        
+        if ($test && !empty($test['results'])) {
+            $results = json_decode($test['results'], true);
+            
+            die(json_encode([
+                'success' => true,
+                'results' => $results,
+                'test_id' => $idTest
+            ]));
+        } else {
+            die(json_encode([
+                'success' => false,
+                'message' => $this->l('No hay resultados disponibles para este test')
+            ]));
+        }
     }
     
     private function processConfiguration()
@@ -120,6 +246,7 @@ class Stressor extends Module
             // Guardar en base de datos
             $data = [
                 'request' => pSQL($jsonConfig),
+                'results' => null,
                 'status' => 'draft',
                 'created_at' => date('Y-m-d H:i:s'),
                 'updated_at' => date('Y-m-d H:i:s')
@@ -473,7 +600,7 @@ class Stressor extends Module
     }
     
     /**
-     * Mostrar lista de tests guardados
+     * Mostrar lista de tests guardados con enlace a resultados
      */
     private function renderTestsList()
     {
@@ -500,7 +627,9 @@ class Stressor extends Module
                             <th>ID</th>
                             <th>' . $this->l('Nombre') . '</th>
                             <th>' . $this->l('Estado') . '</th>
+                            <th>' . $this->l('Resultados') . '</th>
                             <th>' . $this->l('Creado') . '</th>
+                            <th>' . $this->l('Ejecutado') . '</th>
                             <th>' . $this->l('Acciones') . '</th>
                         </tr>
                     </thead>
@@ -509,6 +638,27 @@ class Stressor extends Module
         foreach ($tests as $test) {
             $config = json_decode($test['request'], true);
             $name = isset($config['name']) ? $config['name'] : 'Sin nombre';
+            
+            // Verificar si hay resultados
+            $hasResults = !empty($test['results']);
+            $resultsInfo = '';
+            
+            if ($hasResults) {
+                $resultsData = json_decode($test['results'], true);
+                $resultTypes = [];
+                
+                foreach ($resultsData as $key => $result) {
+                    if (isset($result['url'])) {
+                        $resultTypes[] = 'Auditoría';
+                    } elseif (is_array($result) && isset($result[0]['name'])) {
+                        $resultTypes[] = 'Carga';
+                    }
+                }
+                
+                $resultsInfo = '<span class="badge badge-success">' . 
+                              implode(' + ', array_unique($resultTypes)) . 
+                              '</span>';
+            }
             
             $html .= '
                     <tr>
@@ -519,22 +669,43 @@ class Stressor extends Module
                                 ' . $test['status'] . '
                             </span>
                         </td>
+                        <td>' . $resultsInfo . '</td>
                         <td>' . $test['created_at'] . '</td>
+                        <td>' . ($test['executed_at'] ?: '-') . '</td>
                         <td>
-                            <a href="' . $this->context->link->getAdminLink('AdminModules') . '&configure=' . $this->name . '&view_test=' . $test['id_test'] . '" 
-                               class="btn btn-default btn-sm">
-                                <i class="icon-eye"></i> Ver
-                            </a>
-                            <button type="button" 
-                                    onclick="executeTest(' . $test['id_test'] . ')" 
-                                    class="btn btn-success btn-sm">
-                                <i class="icon-play"></i> Ejecutar
-                            </button>
-                            <a href="' . $this->context->link->getAdminLink('AdminModules') . '&configure=' . $this->name . '&delete_test=' . $test['id_test'] . '" 
-                               class="btn btn-danger btn-sm" 
-                               onclick="return confirm(\'' . $this->l('¿Eliminar este test?') . '\')">
-                                <i class="icon-trash"></i>
-                            </a>
+                            <div class="btn-group">
+                                <a href="' . $this->context->link->getAdminLink('AdminModules') . '&configure=' . $this->name . '&view_test=' . $test['id_test'] . '" 
+                                   class="btn btn-default btn-sm" title="' . $this->l('Ver detalles') . '">
+                                    <i class="icon-eye"></i>
+                                </a>';
+            
+            if ($hasResults) {
+                $html .= '
+                                <button type="button" 
+                                        onclick="showResults(' . $test['id_test'] . ')" 
+                                        class="btn btn-info btn-sm" title="' . $this->l('Ver resultados') . '">
+                                    <i class="icon-bar-chart"></i>
+                                </button>';
+            }
+            
+            $html .= '
+                                <button type="button" 
+                                        onclick="executeTest(' . $test['id_test'] . ')" 
+                                        class="btn btn-success btn-sm" title="' . $this->l('Ejecutar test') . '">
+                                    <i class="icon-play"></i>
+                                </button>
+                                <button type="button" 
+                                        onclick="exportResults(' . $test['id_test'] . ')" 
+                                        class="btn btn-warning btn-sm" title="' . $this->l('Exportar resultados') . '">
+                                    <i class="icon-download"></i>
+                                </button>
+                                <a href="' . $this->context->link->getAdminLink('AdminModules') . '&configure=' . $this->name . '&delete_test=' . $test['id_test'] . '" 
+                                   class="btn btn-danger btn-sm" 
+                                   onclick="return confirm(\'' . $this->l('¿Eliminar este test?') . '\')"
+                                   title="' . $this->l('Eliminar') . '">
+                                    <i class="icon-trash"></i>
+                                </a>
+                            </div>
                         </td>
                     </tr>';
         }
@@ -545,6 +716,26 @@ class Stressor extends Module
             </div>
         </div>
         
+        <!-- Modal para mostrar resultados -->
+        <div class="modal fade" id="resultsModal" tabindex="-1" role="dialog">
+            <div class="modal-dialog modal-lg" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal">&times;</button>
+                        <h4 class="modal-title">' . $this->l('Resultados del Test') . '</h4>
+                    </div>
+                    <div class="modal-body">
+                        <pre id="resultsContent" style="max-height: 500px; overflow: auto;"></pre>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" data-dismiss="modal">' . $this->l('Cerrar') . '</button>
+                        <button type="button" class="btn btn-primary" onclick="downloadResults()">' . $this->l('Descargar JSON') . '</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Formularios ocultos -->
         <form id="executeTestForm" method="post" style="display: none;">
             <input type="hidden" name="executeTest" value="1">
             <input type="hidden" name="id_test" id="testIdToExecute">
@@ -552,11 +743,61 @@ class Stressor extends Module
         </form>
         
         <script>
+        var currentResults = null;
+        var currentTestId = null;
+        
         function executeTest(idTest) {
             if (confirm("' . $this->l('¿Ejecutar este test ahora?') . '")) {
                 document.getElementById("testIdToExecute").value = idTest;
                 document.getElementById("executeTestForm").submit();
             }
+        }
+        
+        function showResults(idTest) {
+            currentTestId = idTest;
+            $.ajax({
+                url: "' . $this->context->link->getAdminLink('AdminModules') . '",
+                type: "POST",
+                data: {
+                    ajax: 1,
+                    action: "getTestResults",
+                    id_test: idTest,
+                    token: "' . Tools::getAdminTokenLite('AdminModules') . '"
+                },
+                success: function(response) {
+                    try {
+                        var data = JSON.parse(response);
+                        if (data.success) {
+                            currentResults = data.results;
+                            var formatted = JSON.stringify(data.results, null, 2);
+                            document.getElementById("resultsContent").textContent = formatted;
+                            $("#resultsModal").modal("show");
+                        } else {
+                            alert(data.message || "' . $this->l('Error al cargar resultados') . '");
+                        }
+                    } catch (e) {
+                        console.error(e);
+                        alert("' . $this->l('Error al procesar resultados') . '");
+                    }
+                }
+            });
+        }
+        
+        function downloadResults() {
+            if (!currentResults) return;
+            
+            var dataStr = JSON.stringify(currentResults, null, 2);
+            var dataUri = "data:application/json;charset=utf-8," + encodeURIComponent(dataStr);
+            var exportFileDefaultName = "stressor_results_" + currentTestId + ".json";
+            
+            var linkElement = document.createElement("a");
+            linkElement.setAttribute("href", dataUri);
+            linkElement.setAttribute("download", exportFileDefaultName);
+            linkElement.click();
+        }
+        
+        function exportResults(idTest) {
+            window.location.href = "' . $this->context->link->getAdminLink('AdminModules') . '&configure=' . $this->name . '&export_test=" + idTest;
         }
         </script>';
         
@@ -578,12 +819,310 @@ class Stressor extends Module
     }
     
     /**
-     * Ejecutar un test
+     * Ejecutar un test y guardar resultados
      */
     private function executeTest($idTest)
     {
-        // Obtener configuración de la base de datos
-        $sql = "SELECT request FROM `" . _DB_PREFIX_ . self::DB_TABLE . "` 
+        try {
+            // Obtener configuración de la base de datos
+            $sql = "SELECT request FROM `" . _DB_PREFIX_ . self::DB_TABLE . "` 
+                    WHERE id_test = " . (int)$idTest;
+            
+            $test = Db::getInstance()->getRow($sql);
+            
+            if (!$test) {
+                throw new Exception('Test no encontrado');
+            }
+            
+            // Decodificar configuración para determinar el tipo de test
+            $config = json_decode($test['request'], true);
+            
+            // Actualizar estado a "running"
+            Db::getInstance()->update(
+                self::DB_TABLE,
+                [
+                    'status' => 'running',
+                    'updated_at' => date('Y-m-d H:i:s')
+                ],
+                'id_test = ' . (int)$idTest
+            );
+            
+            // Ejecutar el test según su tipo y obtener resultados
+            $results = $this->runStressorTest($config);
+            
+            // Actualizar estado a "completed" con resultados
+            Db::getInstance()->update(
+                self::DB_TABLE,
+                [
+                    'status' => 'completed',
+                    'results' => pSQL(json_encode($results, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)),
+                    'executed_at' => date('Y-m-d H:i:s'),
+                    'updated_at' => date('Y-m-d H:i:s')
+                ],
+                'id_test = ' . (int)$idTest
+            );
+            
+            return true;
+            
+        } catch (Exception $e) {
+            // Actualizar estado a "failed"
+            Db::getInstance()->update(
+                self::DB_TABLE,
+                [
+                    'status' => 'failed',
+                    'updated_at' => date('Y-m-d H:i:s')
+                ],
+                'id_test = ' . (int)$idTest
+            );
+            
+            PrestaShopLogger::addLog('Error ejecutando test Stressor: ' . $e->getMessage(), 3);
+            return false;
+        }
+    }
+    
+    /**
+     * Simular ejecución de test y generar resultados de prueba
+     */
+    private function runStressorTest($config)
+    {
+        // Determinar qué tipos de jobs están configurados
+        $hasAudit = false;
+        $hasLoad = false;
+        
+        if (isset($config['jobs']) && is_array($config['jobs'])) {
+            foreach ($config['jobs'] as $job) {
+                if ($job['type'] === 'audit') {
+                    $hasAudit = true;
+                } elseif ($job['type'] === 'load') {
+                    $hasLoad = true;
+                }
+            }
+        }
+        
+        $results = [];
+        
+        // Generar resultados de auditoría si está configurado
+        if ($hasAudit) {
+            $auditId = isset($config['jobs'][0]['id']) ? $config['jobs'][0]['id'] : 'audit_homepage';
+            
+            $results[$auditId] = [
+                'url' => $config['jobs'][0]['url'] ?? 'https://ejemplo.com',
+                'performance' => rand(70, 98) / 100,
+                'accessibility' => rand(65, 95) / 100,
+                'seo' => rand(75, 99) / 100,
+                'bestPractices' => rand(70, 95) / 100,
+                'pwa' => rand(30, 80) / 100,
+                'categories' => [
+                    ['id' => 'performance', 'score' => rand(70, 98) / 100],
+                    ['id' => 'accessibility', 'score' => rand(65, 95) / 100],
+                    ['id' => 'seo', 'score' => rand(75, 99) / 100],
+                    ['id' => 'best-practices', 'score' => rand(70, 95) / 100],
+                    ['id' => 'pwa', 'score' => rand(30, 80) / 100]
+                ]
+            ];
+        }
+        
+        // Generar resultados de carga si está configurado
+        if ($hasLoad) {
+            $loadId = isset($config['jobs'][0]['id']) ? $config['jobs'][0]['id'] : 'load_test_1';
+            
+            $results[$loadId] = [
+                [
+                    'name' => 'vus',
+                    'type' => 'gauge',
+                    'description' => 'Virtual Users - Número de usuarios virtuales activos',
+                    'unit' => null,
+                    'points' => $this->generateSamplePoints(150, 0, 10),
+                    'summary' => [
+                        'count' => 150,
+                        'avg' => 4.8,
+                        'min' => 0,
+                        'max' => 10
+                    ]
+                ],
+                [
+                    'name' => 'http_reqs',
+                    'type' => 'counter',
+                    'description' => 'HTTP Requests - Total de peticiones HTTP',
+                    'unit' => null,
+                    'points' => $this->generateSamplePoints(100, 1, 1000, true),
+                    'summary' => [
+                        'count' => 100,
+                        'avg' => 500,
+                        'min' => 1,
+                        'max' => 1000
+                    ]
+                ],
+                [
+                    'name' => 'http_req_duration',
+                    'type' => 'trend',
+                    'description' => 'HTTP Request Duration - Duración de las peticiones HTTP',
+                    'unit' => 'ms',
+                    'points' => $this->generateSamplePoints(1000, 120, 890),
+                    'summary' => [
+                        'count' => 1000,
+                        'avg' => 245.3,
+                        'min' => 120,
+                        'max' => 890
+                    ]
+                ],
+                [
+                    'name' => 'http_req_failed',
+                    'type' => 'rate',
+                    'description' => 'HTTP Failed Requests - Porcentaje de peticiones fallidas',
+                    'unit' => '%',
+                    'points' => $this->generateSamplePoints(150, 0, 5),
+                    'summary' => [
+                        'count' => 150,
+                        'avg' => 0.8,
+                        'min' => 0,
+                        'max' => 3.2
+                    ]
+                ],
+                [
+                    'name' => 'iterations',
+                    'type' => 'counter',
+                    'description' => 'Iterations - Iteraciones completadas',
+                    'unit' => null,
+                    'points' => $this->generateSamplePoints(50, 1, 100, true),
+                    'summary' => [
+                        'count' => 50,
+                        'avg' => 50,
+                        'min' => 1,
+                        'max' => 100
+                    ]
+                ]
+            ];
+        }
+        
+        // Si no hay jobs configurados, generar un resultado de prueba completo
+        if (empty($results)) {
+            $results = $this->getSampleFullResults();
+        }
+        
+        return $results;
+    }
+    
+    /**
+     * Generar puntos de datos de muestra
+     */
+    private function generateSamplePoints($count, $minValue, $maxValue, $incremental = false)
+    {
+        $points = [];
+        $baseTime = time() - ($count * 10); // 10 segundos entre puntos
+        
+        for ($i = 0; $i < $count; $i++) {
+            if ($incremental) {
+                $value = $minValue + (($maxValue - $minValue) * $i / $count);
+            } else {
+                $value = rand($minValue * 100, $maxValue * 100) / 100;
+            }
+            
+            $time = date('c', $baseTime + ($i * 10));
+            
+            $points[] = [
+                'time' => $time,
+                'timestamp' => $time,
+                'value' => $value,
+                'tags' => []
+            ];
+        }
+        
+        return $points;
+    }
+    
+    /**
+     * Obtener resultados de prueba completos (para inicialización)
+     */
+    public function getSampleFullResults()
+    {
+        return [
+            'smoke_test_load' => [
+                [
+                    'name' => 'vus',
+                    'type' => 'gauge',
+                    'description' => 'Virtual Users - Número de usuarios virtuales activos',
+                    'unit' => null,
+                    'points' => [
+                        [
+                            'time' => '2024-01-15T10:00:00.000Z',
+                            'timestamp' => '2024-01-15T10:00:00.000Z',
+                            'value' => 5,
+                            'tags' => []
+                        ]
+                    ],
+                    'summary' => [
+                        'count' => 150,
+                        'avg' => 4.8,
+                        'min' => 0,
+                        'max' => 10
+                    ]
+                ],
+                [
+                    'name' => 'http_req_duration',
+                    'type' => 'trend',
+                    'description' => 'HTTP Request Duration - Duración de las peticiones HTTP',
+                    'unit' => 'ms',
+                    'points' => [
+                        [
+                            'time' => '2024-01-15T10:00:00.500Z',
+                            'timestamp' => '2024-01-15T10:00:00.500Z',
+                            'value' => 245.3,
+                            'tags' => []
+                        ]
+                    ],
+                    'summary' => [
+                        'count' => 1000,
+                        'avg' => 245.3,
+                        'min' => 120,
+                        'max' => 890
+                    ]
+                ],
+                [
+                    'name' => 'http_req_failed',
+                    'type' => 'rate',
+                    'description' => 'HTTP Failed Requests - Porcentaje de peticiones fallidas',
+                    'unit' => '%',
+                    'points' => [
+                        [
+                            'time' => '2024-01-15T10:00:01.000Z',
+                            'timestamp' => '2024-01-15T10:00:01.000Z',
+                            'value' => 0.8,
+                            'tags' => []
+                        ]
+                    ],
+                    'summary' => [
+                        'count' => 150,
+                        'avg' => 0.8,
+                        'min' => 0,
+                        'max' => 3.2
+                    ]
+                ]
+            ],
+            'homepage_audit' => [
+                'url' => Tools::getHttpHost(true) . __PS_BASE_URI__,
+                'performance' => 0.94,
+                'accessibility' => 0.85,
+                'seo' => 0.91,
+                'bestPractices' => 0.88,
+                'pwa' => 0.40,
+                'categories' => [
+                    ['id' => 'performance', 'score' => 0.94],
+                    ['id' => 'accessibility', 'score' => 0.85],
+                    ['id' => 'seo', 'score' => 0.91],
+                    ['id' => 'best-practices', 'score' => 0.88],
+                    ['id' => 'pwa', 'score' => 0.40]
+                ]
+            ]
+        ];
+    }
+    
+    /**
+     * Exportar resultados como archivo JSON
+     */
+    private function exportTestResults($idTest)
+    {
+        $sql = "SELECT * FROM `" . _DB_PREFIX_ . self::DB_TABLE . "` 
                 WHERE id_test = " . (int)$idTest;
         
         $test = Db::getInstance()->getRow($sql);
@@ -592,41 +1131,347 @@ class Stressor extends Module
             return false;
         }
         
-        // Actualizar estado a "running"
-        Db::getInstance()->update(
-            self::DB_TABLE,
-            [
-                'status' => 'running',
-                'updated_at' => date('Y-m-d H:i:s')
+        $config = json_decode($test['request'], true);
+        $results = json_decode($test['results'], true);
+        
+        $exportData = [
+            'test_info' => [
+                'id' => $test['id_test'],
+                'name' => $config['name'] ?? 'Sin nombre',
+                'status' => $test['status'],
+                'created_at' => $test['created_at'],
+                'executed_at' => $test['executed_at']
             ],
-            'id_test = ' . (int)$idTest
-        );
+            'configuration' => $config,
+            'results' => $results
+        ];
         
-        // Aquí iría la lógica para ejecutar el stress test
-        // Por ahora solo simulamos
-        sleep(2);
+        $jsonOutput = json_encode($exportData, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         
-        // Actualizar estado a "completed"
-        Db::getInstance()->update(
-            self::DB_TABLE,
-            [
-                'status' => 'completed',
-                'executed_at' => date('Y-m-d H:i:s'),
-                'updated_at' => date('Y-m-d H:i:s')
-            ],
-            'id_test = ' . (int)$idTest
-        );
+        // Enviar como archivo descargable
+        header('Content-Type: application/json');
+        header('Content-Disposition: attachment; filename="stressor_test_' . $idTest . '_' . date('Y-m-d') . '.json"');
+        header('Content-Length: ' . strlen($jsonOutput));
         
-        return true;
+        echo $jsonOutput;
+        exit;
     }
     
     /**
-     * Hook para añadir JavaScript
+     * Preparar datos para las estadísticas
      */
-    public function hookActionAdminControllerSetMedia()
+    private function prepareStatsData($tests)
     {
-        if (Tools::getValue('configure') == $this->name) {
-            $this->context->controller->addJS($this->_path . 'views/js/admin/config.js');
+        $stats = [
+            'tests_count' => count($tests),
+            'tests_30_days' => 0,
+            'avg_performance' => 0,
+            'avg_response_time' => 0,
+            'health_score' => 0,
+            'performance_trend' => 'stable',
+            'last_audit_date' => '',
+            'audit_scores' => [],
+            'load_metrics' => [],
+            'recent_tests' => [],
+            'audit_chart_data' => [
+                'labels' => ['Performance', 'Accessibility', 'SEO', 'Best Practices', 'PWA'],
+                'datasets' => []
+            ],
+            'load_chart_data' => [
+                'labels' => ['Tiempo Respuesta', 'Peticiones Fallidas', 'Usuarios Virtuales'],
+                'datasets' => []
+            ],
+            'trend_chart_data' => [
+                'labels' => [],
+                'datasets' => []
+            ]
+        ];
+        
+        if (empty($tests)) {
+            return $stats;
         }
+        
+        // Procesar cada test
+        $performanceScores = [];
+        $responseTimes = [];
+        $auditData = [];
+        $loadData = [];
+        $trendData = [];
+        
+        foreach ($tests as $test) {
+            $results = json_decode($test['results'], true);
+            if (!$results) continue;
+            
+            // Procesar resultados de auditoría
+            foreach ($results as $jobId => $jobResults) {
+                if (isset($jobResults['url'])) {
+                    // Es un resultado de auditoría
+                    $auditData[] = $jobResults;
+                    
+                    if (empty($stats['last_audit_date'])) {
+                        $stats['last_audit_date'] = $test['executed_at'];
+                    }
+                    
+                    // Acumular scores
+                    if (isset($jobResults['performance'])) {
+                        $performanceScores[] = $jobResults['performance'];
+                    }
+                    
+                    // Preparar datos para gráfico de auditoría
+                    if (empty($stats['audit_scores'])) {
+                        $stats['audit_scores'] = [
+                            'Performance' => $jobResults['performance'] ?? 0,
+                            'Accessibility' => $jobResults['accessibility'] ?? 0,
+                            'SEO' => $jobResults['seo'] ?? 0,
+                            'Best Practices' => $jobResults['bestPractices'] ?? 0,
+                            'PWA' => $jobResults['pwa'] ?? 0
+                        ];
+                    }
+                } elseif (is_array($jobResults) && isset($jobResults[0]['name'])) {
+                    // Es un resultado de carga
+                    $loadData[] = $jobResults;
+                    
+                    // Extraer métricas de carga
+                    foreach ($jobResults as $metric) {
+                        if ($metric['name'] === 'http_req_duration') {
+                            $avgResponse = $metric['summary']['avg'] ?? 0;
+                            $responseTimes[] = $avgResponse;
+                        }
+                        
+                        // Preparar datos para tabla
+                        if (in_array($metric['name'], ['vus', 'http_req_duration', 'http_req_failed', 'iterations'])) {
+                            $metricName = $this->getMetricDisplayName($metric['name']);
+                            $stats['load_metrics'][$metricName] = [
+                                'avg' => $metric['summary']['avg'] ?? 0,
+                                'min' => $metric['summary']['min'] ?? 0,
+                                'max' => $metric['summary']['max'] ?? 0
+                            ];
+                        }
+                    }
+                }
+            }
+            
+            // Preparar datos para tests recientes
+            $config = json_decode($test['request'], true);
+            $testName = $config['name'] ?? 'Test #' . $test['id_test'];
+            
+            // Determinar tipo y score del test
+            $testType = 'audit';
+            $testScore = 0;
+            $responseTime = 0;
+            
+            if (!empty($loadData) && empty($auditData)) {
+                $testType = 'load';
+                $testScore = 0;
+                $responseTime = end($responseTimes);
+            } elseif (!empty($auditData)) {
+                $testType = 'audit';
+                $testScore = end($performanceScores);
+            }
+            
+            $stats['recent_tests'][] = [
+                'name' => $testName,
+                'date' => $test['executed_at'],
+                'type' => $testType,
+                'score' => $testScore,
+                'response_time' => $responseTime
+            ];
+            
+            // Datos para gráfico de evolución
+            if (!empty($performanceScores)) {
+                $lastScore = end($performanceScores);
+                $stats['trend_chart_data']['labels'][] = date('d/m', strtotime($test['executed_at']));
+                $trendData[] = $lastScore;
+            }
+        }
+        
+        // Calcular promedios
+        if (!empty($performanceScores)) {
+            $stats['avg_performance'] = array_sum($performanceScores) / count($performanceScores);
+            $stats['health_score'] = $stats['avg_performance'];
+        }
+        
+        if (!empty($responseTimes)) {
+            $stats['avg_response_time'] = array_sum($responseTimes) / count($responseTimes);
+        }
+        
+        // Determinar tendencia
+        if (count($performanceScores) >= 2) {
+            $firstScore = $performanceScores[0];
+            $lastScore = end($performanceScores);
+            
+            if ($lastScore > $firstScore + 0.05) {
+                $stats['performance_trend'] = 'up';
+            } elseif ($lastScore < $firstScore - 0.05) {
+                $stats['performance_trend'] = 'down';
+            }
+        }
+        
+        // Preparar datos para gráficos
+        $this->prepareChartData($stats, $auditData, $loadData, $trendData);
+        
+        // Contar tests de los últimos 30 días
+        $thirtyDaysAgo = date('Y-m-d H:i:s', strtotime('-30 days'));
+        foreach ($tests as $test) {
+            if ($test['executed_at'] >= $thirtyDaysAgo) {
+                $stats['tests_30_days']++;
+            }
+        }
+        
+        return $stats;
+    }
+    
+    /**
+     * Preparar datos para gráficos
+     */
+    private function prepareChartData(&$stats, $auditData, $loadData, $trendData)
+    {
+        // Gráfico de auditoría (radar)
+        if (!empty($auditData)) {
+            $latestAudit = end($auditData);
+            $stats['audit_chart_data']['datasets'][] = [
+                'label' => 'Puntaje Actual',
+                'data' => [
+                    $latestAudit['performance'] ?? 0,
+                    $latestAudit['accessibility'] ?? 0,
+                    $latestAudit['seo'] ?? 0,
+                    $latestAudit['bestPractices'] ?? 0,
+                    $latestAudit['pwa'] ?? 0
+                ],
+                'backgroundColor' => 'rgba(102, 126, 234, 0.2)',
+                'borderColor' => 'rgba(102, 126, 234, 1)',
+                'borderWidth' => 2
+            ];
+        }
+        
+        // Gráfico de métricas de carga
+        if (!empty($loadData)) {
+            $latestLoad = end($loadData);
+            
+            $responseTime = 0;
+            $failedRequests = 0;
+            $vus = 0;
+            
+            foreach ($latestLoad as $metric) {
+                switch ($metric['name']) {
+                    case 'http_req_duration':
+                        $responseTime = $metric['summary']['avg'] ?? 0;
+                        break;
+                    case 'http_req_failed':
+                        $failedRequests = $metric['summary']['avg'] ?? 0;
+                        break;
+                    case 'vus':
+                        $vus = $metric['summary']['avg'] ?? 0;
+                        break;
+                }
+            }
+            
+            $stats['load_chart_data']['datasets'][] = [
+                'label' => 'Valor Actual',
+                'data' => [$responseTime, $failedRequests, $vus],
+                'backgroundColor' => [
+                    'rgba(54, 162, 235, 0.7)',
+                    'rgba(255, 99, 132, 0.7)',
+                    'rgba(75, 192, 192, 0.7)'
+                ]
+            ];
+        }
+        
+        // Gráfico de evolución
+        if (!empty($trendData)) {
+            $stats['trend_chart_data']['datasets'][] = [
+                'label' => 'Performance Score',
+                'data' => $trendData,
+                'borderColor' => 'rgba(102, 126, 234, 1)',
+                'backgroundColor' => 'rgba(102, 126, 234, 0.1)',
+                'fill' => true,
+                'tension' => 0.4
+            ];
+        }
+    }
+    
+    /**
+     * Obtener nombre legible para métricas
+     */
+    private function getMetricDisplayName($metricName)
+    {
+        $names = [
+            'vus' => 'Usuarios Virtuales',
+            'http_req_duration' => 'Tiempo de Respuesta',
+            'http_req_failed' => 'Peticiones Fallidas',
+            'iterations' => 'Iteraciones',
+            'http_reqs' => 'Total Peticiones',
+            'data_sent' => 'Datos Enviados',
+            'data_received' => 'Datos Recibidos'
+        ];
+        
+        return $names[$metricName] ?? $metricName;
+    }
+    
+    /**
+     * Agregar un test de ejemplo con resultados iniciales
+     */
+    private function addSampleTestWithResults()
+    {
+        $sampleConfig = [
+            'name' => 'Test de Ejemplo - Suite Completa',
+            'owner' => 'Sistema',
+            'timestamp' => time(),
+            'options' => [
+                'runInParallel' => true,
+                'timeout' => 300000,
+                'saveRaw' => false
+            ],
+            'jobs' => [
+                [
+                    'type' => 'load',
+                    'id' => 'smoke_test_load',
+                    'options' => [
+                        'vus' => 10,
+                        'iterations' => 100,
+                        'duration' => '30s'
+                    ]
+                ],
+                [
+                    'type' => 'audit',
+                    'id' => 'homepage_audit',
+                    'url' => Tools::getHttpHost(true) . __PS_BASE_URI__,
+                    'options' => [
+                        'output' => ['json'],
+                        'emulatedFormFactor' => 'mobile',
+                        'onlyCategories' => ['performance', 'accessibility', 'seo']
+                    ]
+                ]
+            ]
+        ];
+        
+        $sampleResults = $this->getSampleFullResults();
+        
+        $data = [
+            'request' => pSQL(json_encode($sampleConfig, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)),
+            'results' => pSQL(json_encode($sampleResults, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)),
+            'status' => 'completed',
+            'created_at' => date('Y-m-d H:i:s'),
+            'updated_at' => date('Y-m-d H:i:s'),
+            'executed_at' => date('Y-m-d H:i:s')
+        ];
+        
+        return Db::getInstance()->insert(self::DB_TABLE, $data);
+    }
+    
+    /**
+     * Cargar traducciones para JavaScript
+     */
+    public function getJsTranslations()
+    {
+        return json_encode([
+            'scenario_name' => $this->l('Nombre del escenario'),
+            'header_key' => $this->l('Clave (ej: Authorization)'),
+            'header_value' => $this->l('Valor'),
+            'remove' => $this->l('Eliminar'),
+            'at_least_one_test' => $this->l('Debe habilitar al menos un tipo de test (Load Test o Audit Test)'),
+            'scenario_name_required' => $this->l('Todos los escenarios deben tener un nombre'),
+            'header_value_required' => $this->l('Si especifica una clave de header, debe proporcionar un valor'),
+        ]);
     }
 }
